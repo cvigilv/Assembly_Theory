@@ -4,212 +4,155 @@
 using Markdown
 using InteractiveUtils
 
-# ╔═╡ e0411564-0bd7-11f0-24da-6b31bd289338
+# ╔═╡ 64a6dc5e-10ad-11f0-37ff-b53693948da1
 begin
-	using MolecularGraph
-	using DataFrames, JSON3, Chain
+	using DataFrames, JSON3, Chain, DelimitedFiles
 	using CairoMakie, AlgebraOfGraphics
 	using HTTP
 	using Statistics
 	using PlutoUI
 end
 
-# ╔═╡ 929a84a4-d145-40c5-9b8f-9297698495ff
-MAP = "map00010"
-
-# ╔═╡ 20de14f8-859f-4064-a92d-9d5a1df24f58
+# ╔═╡ 956c783c-f1b1-44ab-bc55-44ade05cab70
 begin
-	url = "https://rest.kegg.jp/link/rn/$MAP"
-	response = HTTP.get(url)
-	reactions = [split(line, "\t")[2][4:end] for line in split(String(response.body), "\n") if !isempty(line)]
+	url = "https://rest.kegg.jp/link/brite/cpd"
+	cpd2brite = @chain url begin
+		HTTP.get(_).body
+		String
+		split("\n")
+		map(l -> split(l, "\t"), _)
+		filter(!=([""]), _)
+		unique(_)
+		begin
+			d = Dict()
+			for (k,v) in _
+				if !haskey(d, k)
+					d[k[5:end]] = []
+				end
+				push!(d[k[5:end]], v[4:end])
+			end
+			d
+		end
+	end 
 end
 
-# ╔═╡ 5f30e67a-11d9-42ac-ba3d-1fdc6f981b22
-mapconf = String(HTTP.get("https://rest.kegg.jp/get/$MAP/conf").body)
+# ╔═╡ 60708693-8c76-4361-b090-5c5ff7000ed8
+cpd_descriptors = begin
+	json_data = JSON3.read(open("../data/pathway_complexities/complexities_pathway.json", "r"))
+	cpd_data = DataFrame(json_data[:columns], json_data[:colindex][:names])
 
-# ╔═╡ fc3a008d-2151-49ce-9968-01728319f43a
-mapdata = map(split(mapconf, "\n")) do line
-	Dict(zip(["node","url","info"], split(line, "\t"; limit=3)))
-end
-
-# ╔═╡ e2b0756d-d302-4f79-a6f8-f380c6439227
-begin
-	reaction_dict = Dict{String, Any}()
-	for reaction in reactions
-	    url2 = "https://rest.kegg.jp/get/$reaction"
-	    response2 = HTTP.get(url2)
-	    equation = [
-			split(line, "EQUATION")[2][5:end]
-			for line in split(String(response2.body), "\n")
-			if startswith(line, "EQUATION")
-		]
-	    reaction_dict[reaction] = equation
-	end
-end
-
-# ╔═╡ 7f7f3295-c9eb-4a78-beb7-4a567d3d3919
-mapcpd = begin
-	names = map(e -> get(e, "info", missing), mapdata)
-	cpds = filter(e -> startswith(e, "C"), names)
-	map(first, split.(cpds, " "))
-end
-
-# ╔═╡ 91a0a5ba-0f99-4ce9-811b-5b695b62ad7d
-begin
-	json_data = JSON3.read(open("../data/pathway_complexities/complexities_$MAP.json", "r"))
-	
-	# Extract columns
-	columns = json_data[:columns] 
-	
-	# Create DataFrame (assuming columns is a vector of vectors)
-	map_complexity = DataFrame(columns, json_data[:colindex][:names])
-
-	node2ma = map(eachrow(map_complexity)) do r
-		r.id => r.ma
+	map(eachrow(cpd_data)) do r
+		r.id => Dict(
+			"atoms" => r.counted_atoms,
+			"rings" => r.counted_rings,
+			"sp" => r.sp,
+			"sp2" => r.sp2,
+			"sp3" => r.sp3
+		)
 	end |> Dict
 end
 
-# ╔═╡ be1f5592-b024-41db-8bce-52a9c0651b1f
+# ╔═╡ 87d7ee23-63d2-4079-af2f-3691f676a1ce
+
+
+# ╔═╡ cf52c00b-05fd-42ca-b88e-3323ccbd507d
 begin
-	edgelist = Dict()
-	
-	for (rn,eq) in reaction_dict
-		# Get reaction metabolites only present in map
-		rn_cpd = split(replace(eq[1], " + " => ",", " <=> " => ","), ",")
-		#filter!(cpd -> cpd in mapcpd, rn_cpd)
+	df = []
+	for l in readlines("../data/bash_MA_output/intermediate_MA_pathway_no_MA.tsv")[2:end, :]
+		# Get info in line
+		cpd, ma = split(l, "\t")
+		ma = parse(Int, ma)
 
-		if length(rn_cpd) > 0
-			# Add reaction
-			edgelist[rn] = []
-
-			# Connect reaction to it's metabolites
-			for cpd in rn_cpd
-				push!(edgelist[rn], String(last(split(cpd, " "))))
-			end
-		end
-	end
-end
-
-# ╔═╡ d8a8dd8c-c6b1-498d-9905-e2af771d5c6e
-reaction_dict
-
-# ╔═╡ 3793a2f9-38eb-4dea-b070-08b85411a0e5
-begin
-	E = []
-	for (rn, eqs) in reaction_dict
-		for eq in eqs
-			r,p = split(eq, " <=> ")
-			@show @chain r begin
-				replace(r, " + " => " ")
-				split
-				filter(c -> startswith(c, "C"), _)
-			end
-		end
-
-	end
-	E
-end
-
-# ╔═╡ 368ead01-aa2f-4435-9340-00a53337d115
-edgelist
-
-# ╔═╡ 15d901b2-3ac9-4631-90bf-dc7959c4edb4
-begin
-	rn_ma = []
-	for kv in edgelist
-		for cpd in last(kv)
-			ma = get(node2ma, cpd, missing)
-			if !ismissing(ma)
-			push!(
-				rn_ma,
-				Dict(
-					"rn" => first(kv),
-					"cpd" => cpd,
-					"ma" => get(node2ma, cpd, missing) 
+		# Get BRITE codes for cpd
+		allbrite = get(cpd2brite, cpd, missing)
+		if !ismissing(allbrite)
+			for brite in allbrite
+				push!(
+					df,
+					merge(
+						Dict(
+							"cpd" => cpd,
+							"ma" => ma,
+							"brite" => brite,
+						),
+						get(
+							cpd_descriptors,
+							cpd,
+							Dict(
+								"atoms" => missing,
+								"rings" => missing,
+								"sp" => missing,
+								"sp2" => missing,
+								"sp3" => missing
+							)
+						)
+					)
+						
 				)
-			)
 			end
 		end
 	end
+	df = DataFrame(df)
 end
 
-# ╔═╡ a99f7c96-abe2-496b-b0ab-817c2eaab265
-rn_ma
+# ╔═╡ 8b8ad8f5-6800-4fe5-9b3d-4b22fb161f85
+data(df) *
+	mapping(
+		:brite,
+		:ma,
+		color=:brite
+	) * 
+	visual(RainClouds; clouds=hist) |> draw
 
-# ╔═╡ 27bef0d0-7018-4f18-940b-33d8121bde57
-draw(
-	data(rn_ma) * mapping(:rn, :cpd, color=:ma),
-	scales(Color=(; colormap=:jet));
-	axis=(; width = 600, height = 600)
-)
+# ╔═╡ 0ff8b69b-9caa-4ea0-bc70-b90197a5f4dd
+data(df) *
+	mapping(
+		:atoms => x -> x+rand(-0.2:0.1:0.02),
+		:ma => x -> x+rand(-0.2:0.1:0.02),
+		color=:rings => nonnumeric,
+		layout=:brite,
+	) * 
+	visual(Scatter; strokewidth=0.5, strokecolor=:black) |> draw
 
-# ╔═╡ 1955f09a-c99a-4484-9c10-de68bbdc024e
-begin
-	ec_dict = Dict{String, Any}()
-	for reaction in reactions
-	    url2 = "https://rest.kegg.jp/get/$reaction"
-	    response2 = HTTP.get(url2)
-	    ec = [
-			split(line, "ENZYME")[2][5:end]
-			for line in split(String(response2.body), "\n")
-			if startswith(line, "ENZYME")
-		]
-	    ec_dict[reaction] = lstrip.(ec)
-	end
-end
+# ╔═╡ 51d06597-1920-4eec-a5f5-b457898a1de8
+data(df) *
+	mapping(
+		:atoms => x -> x+rand(-0.2:0.05:0.02),
+		:ma => x -> x+rand(-0.2:0.05:0.02),
+		color=:brite,
+		layout=:rings => nonnumeric,
+	) * 
+	visual(Scatter; strokewidth=0.5, strokecolor=:black) |> draw
 
-# ╔═╡ 6fdb078b-1105-47f9-ae18-bd502c72923e
-ec_dict
+# ╔═╡ 42572f9a-96f5-4a1c-98c6-9449973c8310
+data(df) *
+	mapping(
+		:rings,
+		:ma,
+		color=:rings
+	) * 
+	visual(BoxPlot) |> draw
 
-# ╔═╡ 7b1e16c6-2550-4eb4-8e56-a9e58f783a5a
-begin
-	rn2ec1 = Dict()
-	rn2ec2 = Dict()
-	for (rn, ec) in ec_dict
-		if !isempty(ec)
-			ec = split(String(ec[1]), " ", keepempty=false)
-			
-			ec1 = unique(first.(ec))
-			ec2 = unique(map(x -> join(split(x, ".")[1:2], "."), ec))
-		
-			rn2ec1[rn] = map(e -> "$e", ec1)
-			rn2ec2[rn] = ec2
-		else
-			rn2ec1[rn] = ["N/A"]
-			rn2ec2[rn] = ["N/A"]
-		end
-	end
-	for l in rn_ma
-		merge!(
-			l,
-			Dict(
-				"ec1" => first(rn2ec1[l["rn"]]),
-				"ec2" => first(rn2ec2[l["rn"]]),
-			)
-		)
-	end
-	rn_ma
-end
+# ╔═╡ ae88d7e4-589c-4808-adc4-23dcd7f5ced9
+data(df) *
+	mapping(
+		:sp2,
+		:ma,
+		color=:sp2
+	) * 
+	visual(BoxPlot) |> draw
 
-# ╔═╡ d623e5c4-2201-4ae1-ab9d-c20f9f20cea5
-draw(
-	data(rn_ma) *
-		mapping(
-			:ec2,
-			:ma,
-			color = :ec1
-			) * visual(Scatter)
-)
+# ╔═╡ a24372e3-b0fb-4926-b476-baccae017e5b
+data(df) *
+	mapping(
+		:sp3,
+		:ma,
+		color=:sp3
+	) * 
+	visual(BoxPlot) |> draw
 
-# ╔═╡ 40a4312f-d5c7-43d8-9b79-242875524208
-draw(
-	data(rn_ma) *
-		mapping(
-			:ec1,
-			:ma,
-			color = :ec1
-			) * visual(Scatter)
-)
+# ╔═╡ a7243e4b-39ee-4197-b18e-61905b03441f
+hexbin(df[!, :atoms], df[!, :ma], cellsize=(1,1))
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -218,9 +161,9 @@ AlgebraOfGraphics = "cbdf2221-f076-402e-a563-3d30da359d67"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 Chain = "8be319e6-bccf-4806-a6f7-6fae938471bc"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
-MolecularGraph = "6c89ec66-9cd8-5372-9f91-fabc50dd27fd"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
@@ -229,10 +172,10 @@ AlgebraOfGraphics = "~0.9.2"
 CairoMakie = "~0.13.2"
 Chain = "~0.6.0"
 DataFrames = "~1.7.0"
+DelimitedFiles = "~1.9.1"
 HTTP = "~1.10.15"
 JSON3 = "~1.14.1"
-MolecularGraph = "~0.17.3"
-PlutoUI = "~0.7.23"
+PlutoUI = "~0.7.61"
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000002
@@ -241,7 +184,7 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.10.9"
 manifest_format = "2.0"
-project_hash = "7bcdf05e5e56f0d5d208ea1c090f29c8cb850d65"
+project_hash = "4e19b0d640c52a46183167d88fa3608de28bc2ff"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -326,12 +269,6 @@ version = "0.4.2"
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
 version = "1.1.1"
-
-[[deps.ArnoldiMethod]]
-deps = ["LinearAlgebra", "Random", "StaticArrays"]
-git-tree-sha1 = "d57bd3762d308bded22c3b82d033bff85f6195c6"
-uuid = "ec485272-7323-5ecc-a04f-4719b315124d"
-version = "0.4.0"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -435,21 +372,15 @@ version = "3.29.0"
 
 [[deps.ColorTypes]]
 deps = ["FixedPointNumbers", "Random"]
-git-tree-sha1 = "c7acce7a7e1078a20a285211dd73cd3941a871d6"
+git-tree-sha1 = "b10d0b65641d57b8b4d5e234446582de5047050d"
 uuid = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
-version = "0.12.0"
-
-    [deps.ColorTypes.extensions]
-    StyledStringsExt = "StyledStrings"
-
-    [deps.ColorTypes.weakdeps]
-    StyledStrings = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
+version = "0.11.5"
 
 [[deps.ColorVectorSpace]]
 deps = ["ColorTypes", "FixedPointNumbers", "LinearAlgebra", "Requires", "Statistics", "TensorCore"]
-git-tree-sha1 = "8b3b6f87ce8f65a2b4f857528fd8d70086cd72b1"
+git-tree-sha1 = "a1f44953f2382ebb937d60dafbe2deea4bd23249"
 uuid = "c3611d14-8923-5661-9e6a-0046d554d3a4"
-version = "0.11.0"
+version = "0.10.0"
 weakdeps = ["SpecialFunctions"]
 
     [deps.ColorVectorSpace.extensions]
@@ -790,12 +721,6 @@ git-tree-sha1 = "01979f9b37367603e2848ea225918a3b3861b606"
 uuid = "3b182d85-2403-5c21-9c21-1e1f0cc25472"
 version = "1.3.14+1"
 
-[[deps.Graphs]]
-deps = ["ArnoldiMethod", "Compat", "DataStructures", "Distributed", "Inflate", "LinearAlgebra", "Random", "SharedArrays", "SimpleTraits", "SparseArrays", "Statistics"]
-git-tree-sha1 = "1dc470db8b1131cfc7fb4c115de89fe391b9e780"
-uuid = "86223c79-3864-5bf0-83f7-82e725a168b6"
-version = "1.12.0"
-
 [[deps.GridLayoutBase]]
 deps = ["GeometryBasics", "InteractiveUtils", "Observables"]
 git-tree-sha1 = "dc6bed05c15523624909b3953686c5f5ffa10adc"
@@ -827,9 +752,9 @@ version = "0.3.28"
 
 [[deps.Hyperscript]]
 deps = ["Test"]
-git-tree-sha1 = "8d511d5b81240fc8e6802386302675bdf47737b9"
+git-tree-sha1 = "179267cfa5e712760cd43dcae385d7ea90cc25a4"
 uuid = "47d2ed2b-36de-50cf-bf87-49c2cf4b8b91"
-version = "0.0.4"
+version = "0.0.5"
 
 [[deps.HypertextLiteral]]
 deps = ["Tricks"]
@@ -1186,6 +1111,11 @@ git-tree-sha1 = "f02b56007b064fbfddb4c9cd60161b6dd0f40df3"
 uuid = "e6f89c97-d47a-5376-807f-9c37f3926c36"
 version = "1.1.0"
 
+[[deps.MIMEs]]
+git-tree-sha1 = "1833212fd6f580c20d4291da9c1b4e8a655b128e"
+uuid = "6c6e2e6c-3030-632d-7369-2d6c69616d65"
+version = "1.0.0"
+
 [[deps.MKL_jll]]
 deps = ["Artifacts", "IntelOpenMP_jll", "JLLWrappers", "LazyArtifacts", "Libdl", "oneTBB_jll"]
 git-tree-sha1 = "5de60bc6cb3899cd318d80d627560fae2e2d99ae"
@@ -1243,12 +1173,6 @@ version = "1.2.0"
 
 [[deps.Mmap]]
 uuid = "a63ad114-7e13-5084-954f-fe012c677804"
-
-[[deps.MolecularGraph]]
-deps = ["Base64", "Cairo", "Colors", "Dates", "DelimitedFiles", "GeometryBasics", "Graphs", "JSON", "LinearAlgebra", "MakieCore", "Printf", "Statistics", "YAML", "coordgenlibs_jll", "libinchi_jll"]
-git-tree-sha1 = "dfdcca6ce710ea6591d157054b23e07381cbfe9c"
-uuid = "6c89ec66-9cd8-5372-9f91-fabc50dd27fd"
-version = "0.17.3"
 
 [[deps.MosaicViews]]
 deps = ["MappedArrays", "OffsetArrays", "PaddedViews", "StackViews"]
@@ -1423,10 +1347,10 @@ uuid = "995b91a9-d308-5afd-9ec6-746e21dbc043"
 version = "1.4.3"
 
 [[deps.PlutoUI]]
-deps = ["AbstractPlutoDingetjes", "Base64", "Dates", "Hyperscript", "HypertextLiteral", "IOCapture", "InteractiveUtils", "JSON", "Logging", "Markdown", "Random", "Reexport", "UUIDs"]
-git-tree-sha1 = "5152abbdab6488d5eec6a01029ca6697dff4ec8f"
+deps = ["AbstractPlutoDingetjes", "Base64", "ColorTypes", "Dates", "FixedPointNumbers", "Hyperscript", "HypertextLiteral", "IOCapture", "InteractiveUtils", "JSON", "Logging", "MIMEs", "Markdown", "Random", "Reexport", "URIs", "UUIDs"]
+git-tree-sha1 = "7e71a55b87222942f0f9337be62e26b1f103d3e4"
 uuid = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
-version = "0.7.23"
+version = "0.7.61"
 
 [[deps.PolygonOps]]
 git-tree-sha1 = "77b3d3605fc1cd0b42d95eba87dfcd2bf67d5ff6"
@@ -1702,12 +1626,6 @@ git-tree-sha1 = "9022bcaa2fc1d484f1326eaa4db8db543ca8c66d"
 uuid = "3eaba693-59b7-5ba5-a881-562e759f1c8d"
 version = "0.7.4"
 
-[[deps.StringEncodings]]
-deps = ["Libiconv_jll"]
-git-tree-sha1 = "b765e46ba27ecf6b44faf70df40c57aa3a547dcb"
-uuid = "69024149-9ee7-55f6-a4c4-859efe599b68"
-version = "0.3.7"
-
 [[deps.StringManipulation]]
 deps = ["PrecompileTools"]
 git-tree-sha1 = "725421ae8e530ec29bcbdddbe91ff8053421d023"
@@ -1910,12 +1828,6 @@ git-tree-sha1 = "6dba04dbfb72ae3ebe5418ba33d087ba8aa8cb00"
 uuid = "c5fb5394-a638-5e4d-96e5-b29de1b5cf10"
 version = "1.5.1+0"
 
-[[deps.YAML]]
-deps = ["Base64", "Dates", "Printf", "StringEncodings"]
-git-tree-sha1 = "b46894beba6c05cd185d174654479aaec09ea6b1"
-uuid = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
-version = "0.4.13"
-
 [[deps.Zlib_jll]]
 deps = ["Libdl"]
 uuid = "83775a58-1f1d-513f-b197-d71354ab007a"
@@ -1926,12 +1838,6 @@ deps = ["Artifacts", "JLLWrappers", "Libdl"]
 git-tree-sha1 = "446b23e73536f84e8037f5dce465e92275f6a308"
 uuid = "3161d3a3-bdf6-5164-811a-617609db77b4"
 version = "1.5.7+1"
-
-[[deps.coordgenlibs_jll]]
-deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "93fce743c1b36cde0efde11b1867cb7d16b13bf8"
-uuid = "f6050b86-aaaf-512f-8549-0afff1b4d57f"
-version = "3.0.2+0"
 
 [[deps.isoband_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1961,12 +1867,6 @@ deps = ["Artifacts", "JLLWrappers", "Libdl"]
 git-tree-sha1 = "8a22cf860a7d27e4f3498a0fe0811a7957badb38"
 uuid = "f638f0a6-7fb0-5443-88ba-1cc74229b280"
 version = "2.0.3+0"
-
-[[deps.libinchi_jll]]
-deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "e81a593eb6a1a57d4262a3ed18a6efbc5d8ba83c"
-uuid = "172afb32-8f1c-513b-968f-184fcd77af72"
-version = "1.6.0+0"
 
 [[deps.libpng_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Zlib_jll"]
@@ -2022,25 +1922,17 @@ version = "3.6.0+0"
 """
 
 # ╔═╡ Cell order:
-# ╠═e0411564-0bd7-11f0-24da-6b31bd289338
-# ╠═929a84a4-d145-40c5-9b8f-9297698495ff
-# ╠═20de14f8-859f-4064-a92d-9d5a1df24f58
-# ╠═5f30e67a-11d9-42ac-ba3d-1fdc6f981b22
-# ╠═fc3a008d-2151-49ce-9968-01728319f43a
-# ╠═e2b0756d-d302-4f79-a6f8-f380c6439227
-# ╠═7f7f3295-c9eb-4a78-beb7-4a567d3d3919
-# ╠═91a0a5ba-0f99-4ce9-811b-5b695b62ad7d
-# ╠═be1f5592-b024-41db-8bce-52a9c0651b1f
-# ╠═d8a8dd8c-c6b1-498d-9905-e2af771d5c6e
-# ╠═3793a2f9-38eb-4dea-b070-08b85411a0e5
-# ╠═368ead01-aa2f-4435-9340-00a53337d115
-# ╠═15d901b2-3ac9-4631-90bf-dc7959c4edb4
-# ╠═a99f7c96-abe2-496b-b0ab-817c2eaab265
-# ╠═27bef0d0-7018-4f18-940b-33d8121bde57
-# ╠═1955f09a-c99a-4484-9c10-de68bbdc024e
-# ╠═6fdb078b-1105-47f9-ae18-bd502c72923e
-# ╠═7b1e16c6-2550-4eb4-8e56-a9e58f783a5a
-# ╠═d623e5c4-2201-4ae1-ab9d-c20f9f20cea5
-# ╠═40a4312f-d5c7-43d8-9b79-242875524208
+# ╠═64a6dc5e-10ad-11f0-37ff-b53693948da1
+# ╠═956c783c-f1b1-44ab-bc55-44ade05cab70
+# ╠═60708693-8c76-4361-b090-5c5ff7000ed8
+# ╠═87d7ee23-63d2-4079-af2f-3691f676a1ce
+# ╠═cf52c00b-05fd-42ca-b88e-3323ccbd507d
+# ╠═8b8ad8f5-6800-4fe5-9b3d-4b22fb161f85
+# ╠═0ff8b69b-9caa-4ea0-bc70-b90197a5f4dd
+# ╠═51d06597-1920-4eec-a5f5-b457898a1de8
+# ╠═42572f9a-96f5-4a1c-98c6-9449973c8310
+# ╠═ae88d7e4-589c-4808-adc4-23dcd7f5ced9
+# ╠═a24372e3-b0fb-4926-b476-baccae017e5b
+# ╠═a7243e4b-39ee-4197-b18e-61905b03441f
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
